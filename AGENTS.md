@@ -70,3 +70,28 @@ All Rust code must respect these workspace-level lints defined in `Cargo.toml`:
 ## Code Formatting
 - Always format code before completing work: run `pnpm format` for TypeScript/JavaScript and `cargo fmt` for Rust.
 - Run these commands regularly during development and always at the end of a coding session to ensure consistent formatting.
+
+## Cursor Cloud specific instructions
+
+### Services overview
+- **Web app** (`apps/web`): Next.js 15 on port 3000. Start with `cd apps/web && NODE_OPTIONS='--disable-warning=DEP0169' node_modules/.bin/next dev --port 3000` after exporting env vars from `../../.env`.
+- **MySQL 8.0**: Docker container on port 3306 (empty root password, DB `planetscale`).
+- **MinIO (S3)**: Docker container on ports 9000/9001 (creds `capS3root`/`capS3root`, bucket `capso`).
+- **Media Server**: Docker container on port 3456 (FFmpeg-based, optional for basic web dev).
+
+### Starting Docker services
+Run `sg docker -c "docker compose up -d --wait"` from `packages/local-docker/`. The `sg docker` wrapper is needed because the `ubuntu` user's Docker group membership requires a new shell context. Alternatively, prefix Docker commands with `sudo`.
+
+### Environment file
+The `pnpm env-setup` script is interactive (uses `@clack/prompts`). For non-interactive use, generate `.env` at the repo root directly with these minimum variables:
+`NODE_ENV`, `WEB_URL`, `NEXTAUTH_URL`, `NEXT_PUBLIC_WEB_URL`, `NEXTAUTH_SECRET`, `DATABASE_ENCRYPTION_KEY`, `DATABASE_URL`, `CAP_AWS_ACCESS_KEY`, `CAP_AWS_SECRET_KEY`, `CAP_AWS_BUCKET`, `CAP_AWS_REGION`, `CAP_AWS_ENDPOINT`. See `scripts/env-cli.js` for Docker defaults.
+
+### Database setup
+After Docker services are running, push the schema: `pnpm db:push`. This is required before the web app can start properly.
+
+### Gotchas
+- `pnpm install` in pnpm 10 skips build scripts by default. The web app works fine without them (esbuild/sharp/swc use platform-specific optional deps), but if you need to rebuild native modules, use `pnpm rebuild <pkg>`.
+- `pnpm lint` reports many pre-existing warnings/errors in the codebase; this is expected and not blocking.
+- Email login requires `RESEND_API_KEY` for sending verification codes. Without it, the login flow reaches the OTP entry page but no email is delivered. Check server logs for the verification token if needed.
+- The desktop app (`apps/desktop`) requires macOS or Windows with GUI; it cannot run in Linux cloud VMs.
+- Web tests: `pnpm test:web` runs Vitest unit tests from `apps/web`.
