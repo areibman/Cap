@@ -1,35 +1,40 @@
+mod output;
 mod record;
+mod screenshot;
 
-use std::{
-    io::{Write, stdout},
-    path::PathBuf,
-};
+use std::{io::Write, path::PathBuf, sync::Arc, sync::atomic::AtomicU32};
 
 use cap_export::ExporterBase;
 use cap_project::XY;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use output::{OutputFormat, print_error, print_json_value, print_list, status_message};
 use record::RecordStart;
-use serde_json::json;
-use tracing::*;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use screenshot::ScreenshotArgs;
+use serde::Serialize;
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
+#[command(name = "cap", about = "Cap — Screen recording for sharing", version)]
 struct Cli {
+    #[arg(long, global = true, help = "Output results as JSON")]
+    json: bool,
+
+    #[arg(short, long, global = true, help = "Enable verbose logging")]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Export a '.cap' project to an mp4 file
     Export(Export),
-    /// Start a recording or list available capture targets and devices
     Record(RecordArgs),
+    Screenshot(ScreenshotArgs),
 }
 
 #[derive(Args)]
 #[command(args_conflicts_with_subcommands = true)]
-// #[command(flatten_help = true)]
 struct RecordArgs {
     #[command(subcommand)]
     command: Option<RecordCommands>,
@@ -40,109 +45,203 @@ struct RecordArgs {
 
 #[derive(Subcommand)]
 enum RecordCommands {
-    /// List screens available for capturing
     Screens,
-    /// List windows available for capturing
     Windows,
-    /// List cameras available for capturing
     Cameras,
-    // Mics,
+    Mics,
+}
+
+#[derive(Serialize)]
+struct ScreenInfo {
+    index: usize,
+    id: String,
+    name: String,
+    refresh_rate: f64,
+}
+
+#[derive(Serialize)]
+struct WindowInfo {
+    index: usize,
+    id: String,
+    name: String,
+    owner_name: String,
+    refresh_rate: f64,
+}
+
+#[derive(Serialize)]
+struct CameraInfo {
+    display_name: String,
+}
+
+#[derive(Serialize)]
+struct MicInfo {
+    name: String,
+}
+
+#[derive(Serialize)]
+struct ExportResult {
+    output_path: String,
+}
+
+#[derive(ValueEnum, Clone, Debug)]
+enum CompressionLevel {
+    Maximum,
+    Social,
+    Web,
+    Potato,
+}
+
+impl From<CompressionLevel> for cap_export::mp4::ExportCompression {
+    fn from(val: CompressionLevel) -> Self {
+        match val {
+            CompressionLevel::Maximum => cap_export::mp4::ExportCompression::Maximum,
+            CompressionLevel::Social => cap_export::mp4::ExportCompression::Social,
+            CompressionLevel::Web => cap_export::mp4::ExportCompression::Web,
+            CompressionLevel::Potato => cap_export::mp4::ExportCompression::Potato,
+        }
+    }
+}
+
+fn parse_resolution(s: &str) -> Result<(u32, u32), String> {
+    let parts: Vec<&str> = s.split('x').collect();
+    if parts.len() != 2 {
+        return Err("Resolution must be in WIDTHxHEIGHT format (e.g., 1920x1080)".to_string());
+    }
+    let width = parts[0]
+        .parse::<u32>()
+        .map_err(|_| "Invalid width".to_string())?;
+    let height = parts[1]
+        .parse::<u32>()
+        .map_err(|_| "Invalid height".to_string())?;
+    Ok((width, height))
 }
 
 #[tokio::main]
 async fn main() -> Result<(), String> {
-    // let (layer, handle) = tracing_subscriber::reload::Layer::new(None::<DynLoggingLayer>);
+    let cli = Cli::parse();
+    let format = OutputFormat::from_json_flag(cli.json);
 
-    let registry = tracing_subscriber::registry().with(tracing_subscriber::filter::filter_fn(
-        (|v| v.target().starts_with("cap_")) as fn(&tracing::Metadata) -> bool,
-    ));
+    let filter = if cli.verbose {
+        EnvFilter::new("cap=trace,cap_recording=trace,cap_export=trace,cap_media=trace")
+    } else {
+        EnvFilter::new("cap=info,cap_recording=warn,cap_export=warn")
+    };
 
-    registry
-        // .with(layer)
+    tracing_subscriber::registry()
+        .with(filter)
         .with(
             tracing_subscriber::fmt::layer()
                 .with_ansi(true)
-                .with_target(true),
+                .with_target(cli.verbose)
+                .with_writer(std::io::stderr),
         )
         .init();
 
-    let cli = Cli::parse();
-
     match cli.command {
         Commands::Export(e) => {
-            if let Err(e) = e.run().await {
-                eprint!("Export failed: {e}")
+            if let Err(e) = e.run(format).await {
+                print_error(format, &e);
+                std::process::exit(1);
             }
         }
         Commands::Record(RecordArgs { command, args }) => match command {
             Some(RecordCommands::Screens) => {
                 let screens = cap_recording::screen_capture::list_displays();
 
-                for (i, (screen, target)) in screens.iter().enumerate() {
-                    println!(
-                        "
-screen {}:
-  id: {}
-  name: {}
-  fps: {}",
-                        i,
-                        screen.id,
-                        screen.name,
-                        target.refresh_rate()
-                    );
-                }
+                let items: Vec<ScreenInfo> = screens
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (screen, target))| ScreenInfo {
+                        index: i,
+                        id: screen.id.to_string(),
+                        name: screen.name.clone(),
+                        refresh_rate: target.refresh_rate(),
+                    })
+                    .collect();
+
+                print_list(format, &items, || {
+                    for item in &items {
+                        println!(
+                            "screen {}:\n  id: {}\n  name: {}\n  fps: {}",
+                            item.index, item.id, item.name, item.refresh_rate
+                        );
+                    }
+                });
             }
             Some(RecordCommands::Windows) => {
                 let windows = cap_recording::screen_capture::list_windows();
 
-                for (i, (window, target)) in windows.iter().enumerate() {
-                    println!(
-                        "
-window {}:
-  id: {}
-  name: {}
-  fps: {}",
-                        i,
-                        window.id,
-                        window.name,
-                        target.display().unwrap().refresh_rate()
-                    );
-                }
+                let items: Vec<WindowInfo> = windows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (window, target))| WindowInfo {
+                        index: i,
+                        id: window.id.to_string(),
+                        name: window.name.clone(),
+                        owner_name: window.owner_name.clone(),
+                        refresh_rate: target.display().map(|d| d.refresh_rate()).unwrap_or(60.0),
+                    })
+                    .collect();
+
+                print_list(format, &items, || {
+                    for item in &items {
+                        println!(
+                            "window {}:\n  id: {}\n  name: {} ({})\n  fps: {}",
+                            item.index, item.id, item.name, item.owner_name, item.refresh_rate
+                        );
+                    }
+                });
             }
             Some(RecordCommands::Cameras) => {
-                let cameras = cap_camera::list_cameras().collect::<Vec<_>>();
+                #[cfg(any(target_os = "macos", windows))]
+                {
+                    let cameras: Vec<CameraInfo> = cap_camera::list_cameras()
+                        .map(|c| CameraInfo {
+                            display_name: c.display_name().to_string(),
+                        })
+                        .collect();
 
-                let mut info = vec![];
-                for camera_info in cameras {
-                    // let format = RequestedFormat::new::<RgbAFormat>(
-                    //     RequestedFormatType::AbsoluteHighestFrameRate,
-                    // );
-
-                    // let Ok(mut camera) = Camera::new(camera_info.index().clone(), format) else {
-                    //     continue;
-                    // };
-
-                    info.push(json!({
-                        // "model_id": camera_info.model_id().to_string(),
-                        "display_name": camera_info.display_name()
-                        // "index": camera_info.index().to_string(),
-                        // "name": camera_info.human_name(),
-                        // "pixel_format": camera.frame_format(),
-                        // "formats":  camera
-                        // 		.compatible_camera_formats()
-                        //   	.unwrap()
-                        //    	.into_iter()
-                        //     .map(|f| format!("{}x{}@{}fps", f.resolution().x(), f.resolution().y(), f.frame_rate()))
-                        //     .collect::<Vec<_>>()
-                    }));
+                    print_list(format, &cameras, || {
+                        for (i, camera) in cameras.iter().enumerate() {
+                            println!("camera {}:\n  name: {}", i, camera.display_name);
+                        }
+                    });
                 }
 
-                println!("{}", serde_json::to_string_pretty(&info).unwrap());
+                #[cfg(not(any(target_os = "macos", windows)))]
+                {
+                    print_list(format, &Vec::<CameraInfo>::new(), || {
+                        println!("Camera listing is not supported on this platform");
+                    });
+                }
+            }
+            Some(RecordCommands::Mics) => {
+                let mics = cap_recording::feeds::microphone::MicrophoneFeed::list();
+
+                let items: Vec<MicInfo> = mics
+                    .keys()
+                    .map(|name| MicInfo { name: name.clone() })
+                    .collect();
+
+                print_list(format, &items, || {
+                    for (i, mic) in items.iter().enumerate() {
+                        println!("mic {}:\n  name: {}", i, mic.name);
+                    }
+                });
             }
             None => {
-                args.run().await?;
+                if let Err(e) = args.run(format).await {
+                    print_error(format, &e);
+                    std::process::exit(1);
+                }
             }
         },
+        Commands::Screenshot(s) => {
+            if let Err(e) = s.run(format).await {
+                print_error(format, &e);
+                std::process::exit(1);
+            }
+        }
     }
 
     Ok(())
@@ -152,74 +251,63 @@ window {}:
 struct Export {
     project_path: PathBuf,
     output_path: Option<PathBuf>,
+
+    #[arg(long, default_value = "60")]
+    fps: u32,
+
+    #[arg(long, value_parser = parse_resolution, default_value = "1920x1080")]
+    resolution: (u32, u32),
+
+    #[arg(long, value_enum, default_value = "maximum")]
+    compression: CompressionLevel,
 }
 
 impl Export {
-    async fn run(self) -> Result<(), String> {
+    async fn run(self, format: OutputFormat) -> Result<(), String> {
+        status_message(&format!("Exporting '{}' ...", self.project_path.display()));
+
         let exporter_base = ExporterBase::builder(self.project_path)
             .build()
             .await
             .map_err(|v| format!("Exporter build error: {v}"))?;
 
-        let mut stdout = stdout();
+        let frame_count = Arc::new(AtomicU32::new(0));
+        let frame_count_clone = frame_count.clone();
 
         let exporter_output_path = cap_export::mp4::Mp4ExportSettings {
-            fps: 60,
-            resolution_base: XY::new(1920, 1080),
-            compression: cap_export::mp4::ExportCompression::Maximum,
+            fps: self.fps,
+            resolution_base: XY::new(self.resolution.0, self.resolution.1),
+            compression: self.compression.into(),
             custom_bpp: None,
             force_ffmpeg_decoder: false,
         }
-        .export(exporter_base, move |_f| {
-            // print!("\rrendered frame {f}");
-
-            stdout.flush().unwrap();
+        .export(exporter_base, move |f| {
+            frame_count_clone.store(f, std::sync::atomic::Ordering::Relaxed);
+            eprint!("\rRendered frame {f}");
+            std::io::stderr().flush().ok();
             true
         })
         .await
-        .map_err(|v| format!("Exporter error: {v}"))?;
+        .map_err(|v| format!("Export error: {v}"))?;
+
+        eprintln!();
 
         let output_path = if let Some(output_path) = self.output_path {
-            std::fs::copy(&exporter_output_path, &output_path).unwrap();
+            std::fs::copy(&exporter_output_path, &output_path)
+                .map_err(|e| format!("Failed to copy output: {e}"))?;
             output_path
         } else {
             exporter_output_path
         };
 
-        info!("Exported video to '{}'", output_path.display());
+        let result = ExportResult {
+            output_path: output_path.display().to_string(),
+        };
+
+        print_json_value(format, &result, || {
+            println!("Exported video to '{}'", result.output_path);
+        });
 
         Ok(())
     }
 }
-
-// fn ffmpeg_callback_experiment() {
-//     unsafe {
-//         unsafe extern "C" fn ffmpeg_log_callback(
-//             arg1: *mut std::ffi::c_void,
-//             arg2: std::ffi::c_int,
-//             arg3: *const std::ffi::c_char,
-//             arg4: *mut std::ffi::c_char,
-//         ) {
-//             // ffmpeg::sys::AVClass;
-
-//             if !arg1.is_null() {
-//                 let arg1_ptr = arg1;
-//                 let arg1 = **(arg1 as *mut *mut AVClass);
-//                 dbg!(CStr::from_ptr(arg1.class_name));
-//                 if let Some(item_name_fn) = arg1.item_name {
-//                     dbg!(CStr::from_ptr(item_name_fn(arg1_ptr)));
-//                 }
-//             }
-
-//             // let class_name = if !arg1.is_null() {
-//             //     CStr::from_ptr((*arg1).class_name)
-//             // } else {
-//             //     "unknown".to_string()
-//             // };
-
-//             // println!("[{class_name}] {arg2} {s:?}",);
-//         }
-
-//         ffmpeg::sys::av_log_set_callback(Some(ffmpeg_log_callback));
-//     }
-// }
