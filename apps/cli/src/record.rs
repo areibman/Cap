@@ -1,6 +1,10 @@
 use crate::output::{OutputFormat, print_json_value, status_message};
-use cap_project::{Platform, RecordingMeta, RecordingMetaInner};
+use cap_project::{
+    Platform, ProjectConfiguration, RecordingMeta, RecordingMetaInner, StudioRecordingMeta,
+    TimelineConfiguration, TimelineSegment,
+};
 use cap_recording::{screen_capture::ScreenCaptureTarget, studio_recording};
+use cap_rendering::ProjectRecordingsMeta;
 use clap::{Args, ValueEnum};
 use scap_targets::{DisplayId, WindowId};
 use serde::Serialize;
@@ -97,6 +101,34 @@ impl RecordStart {
     }
 }
 
+fn build_timeline_config(
+    project_path: &PathBuf,
+    studio_meta: &StudioRecordingMeta,
+) -> Result<TimelineConfiguration, String> {
+    let recordings = ProjectRecordingsMeta::new(project_path, studio_meta)
+        .map_err(|e| format!("Failed to build recordings meta: {e}"))?;
+
+    let timeline_segments = recordings
+        .segments
+        .iter()
+        .enumerate()
+        .map(|(i, segment)| TimelineSegment {
+            recording_clip: i as u32,
+            start: 0.0,
+            end: segment.duration(),
+            timescale: 1.0,
+        })
+        .collect::<Vec<_>>();
+
+    Ok(TimelineConfiguration {
+        segments: timeline_segments,
+        zoom_segments: Vec::new(),
+        scene_segments: Vec::new(),
+        mask_segments: Vec::new(),
+        text_segments: Vec::new(),
+    })
+}
+
 async fn run_studio(
     target_info: ScreenCaptureTarget,
     path: PathBuf,
@@ -143,6 +175,8 @@ async fn run_studio(
         .format("Cap %Y-%m-%d at %H.%M.%S")
         .to_string();
 
+    let studio_meta = completed.meta.clone();
+
     let meta = RecordingMeta {
         platform: Some(Platform::default()),
         project_path: completed.project_path.clone(),
@@ -154,6 +188,13 @@ async fn run_studio(
 
     meta.save_for_project()
         .map_err(|e| format!("Failed to save recording metadata: {e}"))?;
+
+    let timeline = build_timeline_config(&path, &studio_meta)?;
+    let mut project_config = ProjectConfiguration::default();
+    project_config.timeline = Some(timeline);
+    project_config
+        .write(&path)
+        .map_err(|e| format!("Failed to save project config: {e}"))?;
 
     let duration_secs = start_time.elapsed().as_secs_f64();
 
