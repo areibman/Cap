@@ -1,4 +1,5 @@
 use crate::output::{OutputFormat, print_json_value, status_message};
+use cap_project::{Platform, RecordingMeta, RecordingMetaInner};
 use cap_recording::{screen_capture::ScreenCaptureTarget, studio_recording};
 use clap::{Args, ValueEnum};
 use scap_targets::{DisplayId, WindowId};
@@ -136,7 +137,23 @@ async fn run_studio(
 
     status_message(&format!("Stopping recording ({stop_reason})..."));
 
-    actor.stop().await.map_err(|e| e.to_string())?;
+    let completed = actor.stop().await.map_err(|e| e.to_string())?;
+
+    let pretty_name = chrono::Local::now()
+        .format("Cap %Y-%m-%d at %H.%M.%S")
+        .to_string();
+
+    let meta = RecordingMeta {
+        platform: Some(Platform::default()),
+        project_path: completed.project_path.clone(),
+        pretty_name,
+        sharing: None,
+        inner: RecordingMetaInner::Studio(Box::new(completed.meta)),
+        upload: None,
+    };
+
+    meta.save_for_project()
+        .map_err(|e| format!("Failed to save recording metadata: {e}"))?;
 
     let duration_secs = start_time.elapsed().as_secs_f64();
 
@@ -190,7 +207,23 @@ async fn run_instant(
 
     status_message(&format!("Stopping recording ({stop_reason})..."));
 
-    actor.stop().await.map_err(|e| e.to_string())?;
+    let completed = actor.stop().await.map_err(|e| e.to_string())?;
+
+    let pretty_name = chrono::Local::now()
+        .format("Cap %Y-%m-%d at %H.%M.%S")
+        .to_string();
+
+    let meta = RecordingMeta {
+        platform: Some(Platform::default()),
+        project_path: completed.project_path.clone(),
+        pretty_name,
+        sharing: None,
+        inner: RecordingMetaInner::Instant(completed.meta),
+        upload: None,
+    };
+
+    meta.save_for_project()
+        .map_err(|e| format!("Failed to save recording metadata: {e}"))?;
 
     let duration_secs = start_time.elapsed().as_secs_f64();
 
