@@ -81,127 +81,138 @@ impl RecordStart {
             path.display()
         ));
 
+        let system_audio = self.system_audio;
+        let fps = self.fps;
+        let duration = self.duration;
+
         match self.mode {
-            RecordingMode::Studio => self.run_studio(target_info, path, format).await,
-            RecordingMode::Instant => self.run_instant(target_info, path, format).await,
+            RecordingMode::Studio => {
+                run_studio(target_info, path, format, system_audio, fps, duration).await
+            }
+            RecordingMode::Instant => {
+                run_instant(target_info, path, format, system_audio, duration).await
+            }
         }
     }
+}
 
-    async fn run_studio(
-        &self,
-        target_info: ScreenCaptureTarget,
-        path: PathBuf,
-        format: OutputFormat,
-    ) -> Result<(), String> {
-        let mut builder = studio_recording::Actor::builder(path.clone(), target_info)
-            .with_system_audio(self.system_audio)
-            .with_custom_cursor(false);
+async fn run_studio(
+    target_info: ScreenCaptureTarget,
+    path: PathBuf,
+    format: OutputFormat,
+    system_audio: bool,
+    fps: Option<u32>,
+    duration: Option<f64>,
+) -> Result<(), String> {
+    let mut builder = studio_recording::Actor::builder(path.clone(), target_info)
+        .with_system_audio(system_audio)
+        .with_custom_cursor(false);
 
-        if let Some(fps) = self.fps {
-            builder = builder.with_max_fps(fps);
-        }
-
-        let actor = builder
-            .build(
-                #[cfg(target_os = "macos")]
-                Some(cap_recording::SendableShareableContent::from(
-                    cidre::sc::ShareableContent::current()
-                        .await
-                        .map_err(|e| format!("Failed to get shareable content: {e}"))?,
-                )),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let start_time = Instant::now();
-
-        if self.duration.is_some() {
-            status_message("Recording... (will auto-stop after specified duration)");
-        } else {
-            status_message("Recording... (press Ctrl+C to stop)");
-        }
-
-        let stop_reason = wait_for_stop_signal(self.duration, actor.done_fut()).await;
-
-        status_message(&format!("Stopping recording ({stop_reason})..."));
-
-        actor.stop().await.map_err(|e| e.to_string())?;
-
-        let duration_secs = start_time.elapsed().as_secs_f64();
-
-        let result = RecordingResult {
-            project_path: path.display().to_string(),
-            duration_secs,
-            mode: "studio".to_string(),
-        };
-
-        print_json_value(format, &result, || {
-            println!(
-                "Recording saved to '{}' ({:.1}s)",
-                result.project_path, result.duration_secs
-            );
-        });
-
-        Ok(())
+    if let Some(fps) = fps {
+        builder = builder.with_max_fps(fps);
     }
 
-    async fn run_instant(
-        &self,
-        target_info: ScreenCaptureTarget,
-        path: PathBuf,
-        format: OutputFormat,
-    ) -> Result<(), String> {
-        let builder = cap_recording::instant_recording::Actor::builder(path.clone(), target_info)
-            .with_system_audio(self.system_audio);
+    let actor = builder
+        .build(
+            #[cfg(target_os = "macos")]
+            Some(cap_recording::SendableShareableContent::from(
+                cidre::sc::ShareableContent::current()
+                    .await
+                    .map_err(|e| format!("Failed to get shareable content: {e}"))?,
+            )),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
 
-        let actor = builder
-            .build(
-                #[cfg(target_os = "macos")]
-                Some(cap_recording::SendableShareableContent::from(
-                    cidre::sc::ShareableContent::current()
-                        .await
-                        .map_err(|e| format!("Failed to get shareable content: {e}"))?,
-                )),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+    let start_time = Instant::now();
 
-        let start_time = Instant::now();
-
-        if self.duration.is_some() {
-            status_message("Recording... (will auto-stop after specified duration)");
-        } else {
-            status_message("Recording... (press Ctrl+C to stop)");
-        }
-
-        let stop_reason = wait_for_stop_signal(self.duration, actor.done_fut()).await;
-
-        status_message(&format!("Stopping recording ({stop_reason})..."));
-
-        actor.stop().await.map_err(|e| e.to_string())?;
-
-        let duration_secs = start_time.elapsed().as_secs_f64();
-
-        let result = RecordingResult {
-            project_path: path.display().to_string(),
-            duration_secs,
-            mode: "instant".to_string(),
-        };
-
-        print_json_value(format, &result, || {
-            println!(
-                "Recording saved to '{}' ({:.1}s)",
-                result.project_path, result.duration_secs
-            );
-        });
-
-        Ok(())
+    if duration.is_some() {
+        status_message("Recording... (will auto-stop after specified duration)");
+    } else {
+        status_message("Recording... (press Ctrl+C to stop)");
     }
+
+    let stop_reason = wait_for_stop_signal(duration, actor.done_fut()).await;
+
+    status_message(&format!("Stopping recording ({stop_reason})..."));
+
+    actor.stop().await.map_err(|e| e.to_string())?;
+
+    let duration_secs = start_time.elapsed().as_secs_f64();
+
+    let result = RecordingResult {
+        project_path: path.display().to_string(),
+        duration_secs,
+        mode: "studio".to_string(),
+    };
+
+    print_json_value(format, &result, || {
+        println!(
+            "Recording saved to '{}' ({:.1}s)",
+            result.project_path, result.duration_secs
+        );
+    });
+
+    Ok(())
+}
+
+async fn run_instant(
+    target_info: ScreenCaptureTarget,
+    path: PathBuf,
+    format: OutputFormat,
+    system_audio: bool,
+    duration: Option<f64>,
+) -> Result<(), String> {
+    let builder = cap_recording::instant_recording::Actor::builder(path.clone(), target_info)
+        .with_system_audio(system_audio);
+
+    let actor = builder
+        .build(
+            #[cfg(target_os = "macos")]
+            Some(cap_recording::SendableShareableContent::from(
+                cidre::sc::ShareableContent::current()
+                    .await
+                    .map_err(|e| format!("Failed to get shareable content: {e}"))?,
+            )),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let start_time = Instant::now();
+
+    if duration.is_some() {
+        status_message("Recording... (will auto-stop after specified duration)");
+    } else {
+        status_message("Recording... (press Ctrl+C to stop)");
+    }
+
+    let stop_reason = wait_for_stop_signal(duration, actor.done_fut()).await;
+
+    status_message(&format!("Stopping recording ({stop_reason})..."));
+
+    actor.stop().await.map_err(|e| e.to_string())?;
+
+    let duration_secs = start_time.elapsed().as_secs_f64();
+
+    let result = RecordingResult {
+        project_path: path.display().to_string(),
+        duration_secs,
+        mode: "instant".to_string(),
+    };
+
+    print_json_value(format, &result, || {
+        println!(
+            "Recording saved to '{}' ({:.1}s)",
+            result.project_path, result.duration_secs
+        );
+    });
+
+    Ok(())
 }
 
 async fn wait_for_stop_signal(
     duration: Option<f64>,
-    done_fut: cap_recording::output_pipeline::DoneFut,
+    done_fut: cap_recording::DoneFut,
 ) -> &'static str {
     let duration_sleep = async {
         match duration {
